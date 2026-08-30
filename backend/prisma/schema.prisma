@@ -1,0 +1,104 @@
+// MySQL is the source of truth for users, campaigns, and each email row.
+// Redis (later) only holds the queue + hourly counters — not the email records.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum EmailStatus {
+  scheduled
+  sending
+  sent
+  failed
+  delayed
+}
+
+enum CampaignStatus {
+  scheduled
+  completed
+}
+
+model User {
+  id        String   @id @default(cuid())
+  googleId  String   @unique
+  name      String
+  email     String   @unique
+  avatar    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  slackConnection SlackConnection?
+  senders         Sender[]
+  campaigns       Campaign[]
+}
+
+model SlackConnection {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken String   @db.Text
+  webhookUrl  String?  @db.Text
+  teamName    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Sender {
+  id       String @id @default(cuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email    String
+  smtpHost String
+  smtpPort Int
+  smtpUser String
+  smtpPass String
+
+  createdAt DateTime @default(now())
+
+  campaigns Campaign[]
+
+  @@index([userId])
+}
+
+model Campaign {
+  id          String         @id @default(cuid())
+  userId      String
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  senderId    String
+  sender      Sender         @relation(fields: [senderId], references: [id])
+  subject     String
+  body        String         @db.Text
+  startTime   DateTime
+  delayMs     Int
+  hourlyLimit Int
+  status      CampaignStatus @default(scheduled)
+  createdAt   DateTime       @default(now())
+
+  emails EmailJob[]
+
+  @@index([userId])
+}
+
+// One row per recipient. @@unique(campaignId, recipient) is the idempotency key:
+// the same address cannot be queued twice in one campaign.
+model EmailJob {
+  id          String      @id @default(cuid())
+  campaignId  String
+  campaign    Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  recipient   String
+  scheduledAt DateTime
+  sentAt      DateTime?
+  status      EmailStatus @default(scheduled)
+  bullmqJobId String?     @unique
+  error       String?     @db.Text
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@unique([campaignId, recipient])
+  @@index([status, scheduledAt])
+}
